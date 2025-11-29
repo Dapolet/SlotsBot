@@ -79,8 +79,8 @@ pip install python-telegram-bot
 
 ```python
 TOKEN = "YOUR_BOT_TOKEN_HERE"
-Добавьте свои Telegram ID в список администраторов:
 ```
+Добавьте свои Telegram ID в список администраторов:
 
 ```python
 ADMIN_IDS = [123456789, 987654321]  # Ваши ID
