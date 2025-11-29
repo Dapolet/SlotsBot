@@ -5,36 +5,45 @@ import logging
 import json
 import os
 from datetime import datetime, timedelta
+from functools import lru_cache
 from collections import defaultdict
 from typing import Dict, List, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-
+# Настройка логирования
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('slot_bot.log', encoding='utf-8')
+    ]
 )
 
 
 class SlotMachine:
     def __init__(self):
         self.symbols = ['🍒', '🍋', '🍊', '🍇', '🍌', '⭐', '💎', '7️⃣', '💰']
-        self.probabilities = [0.18, 0.16, 0.14, 0.12, 0.10, 0.08, 0.07, 0.06, 0.03]
+        # Увеличили вероятности высокоценных символов
+        self.probabilities = [0.16, 0.15, 0.14, 0.13, 0.12, 0.10, 0.08, 0.07, 0.05]
+
+        # Значительно увеличили выплаты
         self.payouts = {
-            '🍒': {3: 2, 4: 5, 5: 10},
-            '🍋': {3: 3, 4: 8, 5: 15},
-            '🍊': {3: 4, 4: 10, 5: 20},
-            '🍇': {3: 5, 4: 15, 5: 30},
-            '🍌': {3: 8, 4: 20, 5: 50},
-            '⭐': {3: 10, 4: 25, 5: 75},
-            '💎': {3: 15, 4: 40, 5: 100},
-            '7️⃣': {3: 20, 4: 50, 5: 150},
-            '💰': {3: 50, 4: 200, 5: 1000}
+            '🍒': {3: 3, 4: 8, 5: 15},
+            '🍋': {3: 5, 4: 11, 5: 22},
+            '🍊': {3: 6, 4: 14, 5: 28},
+            '🍇': {3: 7, 4: 17, 5: 40},
+            '🍌': {3: 11, 4: 25, 5: 55},
+            '⭐': {3: 14, 4: 35, 5: 82},
+            '💎': {3: 21, 4: 50, 5: 120},
+            '7️⃣': {3: 27, 4: 68, 5: 165},
+            '💰': {3: 70, 4: 270, 5: 1350}
         }
-        self.jackpot = 10000
-        self.jackpot_increment = 0.1
+
+        self.jackpot = 12000  # +20%
+        self.jackpot_increment = 0.12  # +20%
 
     def spin(self, bet: int) -> Tuple[List[List[str]], int, bool]:
         """Генерация результата вращения с учетом вероятностей"""
@@ -101,6 +110,7 @@ class UserManager:
         self.achievements = defaultdict(set)
         self.user_names = defaultdict(str)
         self.user_settings = defaultdict(lambda: {'default_bet': 10})
+        self.jackpot = 10000
 
         # Загружаем данные при инициализации
         self.load_data()
@@ -117,6 +127,7 @@ class UserManager:
                 self.daily_bonuses.clear()
                 self.stats.clear()
                 self.user_names.clear()
+                self.user_settings.clear()  # ДОБАВЛЕНО
 
                 # Восстанавливаем балансы
                 balances_data = data.get('balances', {})
@@ -142,11 +153,25 @@ class UserManager:
                 for user_id_str, user_name in user_names_data.items():
                     self.user_names[int(user_id_str)] = user_name
 
-                # Восстанавливаем настройки пользователей
+                # Восстанавливаем настройки пользователей - ДОБАВЛЕНО
                 user_settings_data = data.get('user_settings', {})
                 for user_id_str, settings in user_settings_data.items():
                     self.user_settings[int(user_id_str)] = settings
 
+                # Восстанавливаем джекпот
+                self.jackpot = data.get('jackpot', 10000)
+
+                # Инициализируем настройки по умолчанию для всех пользователей
+                for user_id in self.balances.keys():
+                    if user_id not in self.user_settings:
+                        self.user_settings[user_id] = {'default_bet': 10}
+                    elif 'default_bet' not in self.user_settings[user_id]:
+                        self.user_settings[user_id]['default_bet'] = 10
+
+                logging.info(f"Данные пользователей загружены из {self.data_file}")
+                logging.info(f"Загружено {len(self.balances)} пользователей")
+                logging.info(f"Загружено {len(self.user_settings)} настроек пользователей")  # ДОБАВЛЕНО
+                logging.info(f"Загружен джекпот: {self.jackpot}")
 
                 logging.info(f"Данные пользователей загружены из {self.data_file}")
                 logging.info(f"Загружено {len(self.balances)} пользователей")
@@ -161,6 +186,7 @@ class UserManager:
             save_balances = {str(k): v for k, v in self.balances.items()}
             save_stats = {str(k): v for k, v in self.stats.items()}
             save_user_names = {str(k): v for k, v in self.user_names.items()}
+            save_user_settings = {str(k): v for k, v in self.user_settings.items()}  # ДОБАВЛЕНО
 
             # Обрабатываем даты бонусов
             save_daily_bonuses = {}
@@ -175,6 +201,8 @@ class UserManager:
                 'daily_bonuses': save_daily_bonuses,
                 'stats': save_stats,
                 'user_names': save_user_names,
+                'user_settings': save_user_settings,  # ДОБАВЛЕНО
+                'jackpot': self.jackpot
             }
 
             # Создаем директорию если не существует
@@ -184,16 +212,39 @@ class UserManager:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
             logging.info(f"Данные {len(save_balances)} пользователей сохранены в {self.data_file}")
+            logging.info(f"Джекпот сохранен: {self.jackpot}")
+            logging.info(f"Настройки {len(save_user_settings)} пользователей сохранены")  # ДОБАВЛЕНО
 
         except Exception as e:
             logging.error(f"Ошибка при сохранении данных: {e}")
 
+    def get_jackpot(self) -> int:
+        return self.jackpot
+
+    def set_jackpot(self, amount: int) -> None:
+        self.jackpot = amount
+        asyncio.create_task(self._delayed_save())
+
+    def update_jackpot(self, amount: int) -> None:
+        self.jackpot += amount
+        asyncio.create_task(self._delayed_save())
+
     def get_default_bet(self, user_id: int) -> int:
+        if user_id not in self.user_settings:
+            self.user_settings[user_id] = {'default_bet': 10}
         return self.user_settings[user_id].get('default_bet', 10)
 
     def set_default_bet(self, user_id: int, bet: int) -> None:
+        logging.info(f"Setting default bet for user {user_id} to {bet}")
+        if user_id not in self.user_settings:
+            self.user_settings[user_id] = {}
         self.user_settings[user_id]['default_bet'] = bet
         asyncio.create_task(self._delayed_save())
+        logging.info(f"User settings after change: {self.user_settings[user_id]}")
+
+    async def _immediate_save(self):
+        """Немедленное сохранение для критических данных"""
+        self.save_data()
 
     async def get_balance(self, user_id: int) -> int:
         async with self._locks[user_id]:
@@ -239,10 +290,14 @@ class SlotBot:
         self.app = Application.builder().token(token).build()
         self._spin_queues = defaultdict(asyncio.Queue)
         self._spin_locks = defaultdict(Lock)
+        self.slot_machine.jackpot = self.user_manager.get_jackpot()
 
         # ДОБАВЛЯЕМ ЗАЩИТУ ОТ ФЛУДА
         self._last_spin_time = defaultdict(float)
         self._min_spin_interval = 5  # Минимальный интервал между спинами в секундах
+
+        # Включаем подробное логирование для отладки
+        logging.getLogger(__name__).setLevel(logging.INFO)
 
         self.setup_handlers()
 
@@ -254,6 +309,7 @@ class SlotBot:
         self.app.add_handler(CommandHandler("leaderboard", self.leaderboard))
         self.app.add_handler(CommandHandler("help", self.help))
         self.app.add_handler(CommandHandler("settings", self.settings))
+        self.app.add_handler(CommandHandler("setbet", self.setbet))  # ДОБАВЛЕНО
 
         self.app.add_handler(CommandHandler("admin", self.admin_stats))
         self.app.add_handler(CommandHandler("addbalance", self.add_balance))
@@ -281,8 +337,10 @@ class SlotBot:
         elif text == "🎁 Бонус":
             await self.bonus(update, context)
 
-        elif text == "⚙️ Настройки":
-            await self.settings(update, context)
+        elif text == "⚙️ Ставка":  # ДОБАВЛЕНО
+            # Создаем временный контекст если его нет
+            temp_context = context if context is not None else ContextTypes.DEFAULT_TYPE()
+            await self.setbet(update, temp_context)
 
         elif text == "🏆 Лидеры":
             await self.leaderboard(update, context)
@@ -299,7 +357,8 @@ class SlotBot:
         # Проверяем флуд-контроль
         if time_since_last_spin < self._min_spin_interval:
             wait_time = int(self._min_spin_interval - time_since_last_spin)
-            await update.message.reply_text(f"⏳ Слишком часто! Подождите {wait_time} секунд(-ы) перед следующим спином.")
+            await update.message.reply_text(
+                f"⏳ Слишком часто! Подождите {wait_time} секунд(-ы) перед следующим спином.")
             return
 
         if self._spin_locks[user_id].locked():
@@ -334,7 +393,7 @@ class SlotBot:
 
     *🎮 КАК ИГРАТЬ:*
     1. Используйте кнопку *«🎰 Крутить»* для быстрого старта
-    2. Настройте удобную ставку в *«⚙️ Настройки»*
+    2. Настройте удобную ставку командой *«/setbet»*
     3. Собирайте комбинации из 3+ одинаковых символов
     4. Получайте *ежедневный бонус* каждый 24 часа
 
@@ -342,6 +401,7 @@ class SlotBot:
 
     *📋 ДОСТУПНЫЕ КОМАНДЫ:*
     /spin - 🎡 Вращение слотов (можно указать ставку)
+    /setbet - 🎯 Изменение базовой ставки
     /balance - 💰 Проверить баланс и статистику  
     /bonus - 🎁 Получить ежедневный бонус
     /leaderboard - 🏆 Таблица лидеров
@@ -354,38 +414,15 @@ class SlotBot:
 
         keyboard = self.get_main_keyboard()
         await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=keyboard)
+
     def get_main_keyboard(self):
         """Создает основную клавиатуру с кнопками"""
         keyboard = [
             [KeyboardButton("🎰 Крутить"), KeyboardButton("💰 Баланс")],
-            [KeyboardButton("🎁 Бонус"), KeyboardButton("⚙️ Настройки")],
+            [KeyboardButton("🎁 Бонус"), KeyboardButton("⚙️ Ставка")],
             [KeyboardButton("🏆 Лидеры"), KeyboardButton("❓ Помощь")]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    def get_settings_keyboard(self, user_id: int):
-        """Создает инлайн клавиатуру для настроек"""
-        current_bet = self.user_manager.get_default_bet(user_id)
-        keyboard = [
-            [
-                InlineKeyboardButton("🎰 Крутить", callback_data="spin"),
-                InlineKeyboardButton("🏠 Меню", callback_data="menu")
-            ],
-            [
-                InlineKeyboardButton("🔽 1", callback_data="bet_1"),
-                InlineKeyboardButton("🔽 5", callback_data="bet_5"),
-                InlineKeyboardButton("🔽 10", callback_data="bet_10")
-            ],
-            [
-                InlineKeyboardButton("🔽 25", callback_data="bet_25"),
-                InlineKeyboardButton("🔽 50", callback_data="bet_50"),
-                InlineKeyboardButton("🔽 100", callback_data="bet_100")
-            ],
-            [
-                InlineKeyboardButton(f"Текущая ставка: {current_bet} 💰", callback_data="current_bet")
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
 
     def get_spin_keyboard(self, user_id: int):
         """Создает инлайн клавиатуру для спинов"""
@@ -393,7 +430,6 @@ class SlotBot:
         keyboard = [
             [
                 InlineKeyboardButton("🎰 Крутить снова", callback_data="spin"),
-                InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
             ],
             [
                 InlineKeyboardButton(f"Ставка: {current_bet} 💰", callback_data="current_bet"),
@@ -410,49 +446,118 @@ class SlotBot:
         user_id = query.from_user.id
         data = query.data
 
+        logging.info(f"Button pressed: {data} by user {user_id}")
+        logging.info(f"=== BUTTON HANDLER ===")
+        logging.info(f"User: {user_id}, Data: {data}")
+        logging.info(f"Starts with 'bet_': {data.startswith('bet_')}")
+
         if data == "spin":
             # Выполняем спин с базовой ставкой
             bet = self.user_manager.get_default_bet(user_id)
             await self.process_spin_from_button(query, user_id, query.from_user.first_name, bet)
 
         elif data.startswith("bet_"):
-            # Изменяем базовую ставку
-            new_bet = int(data.split("_")[1])
-            self.user_manager.set_default_bet(user_id, new_bet)
-            keyboard = self.get_settings_keyboard(user_id)
-            await query.edit_message_text(
-                f"✅ Базовая ставка изменена на: *{new_bet}* 💰\n\n"
-                "Теперь при нажатии '🎰 Крутить' будет использоваться эта ставка.",
-                parse_mode='Markdown',
-                reply_markup=keyboard
-            )
 
-        elif data == "settings":
-            # Показываем настройки
-            current_bet = self.user_manager.get_default_bet(user_id)
-            keyboard = self.get_settings_keyboard(user_id)
-            await query.edit_message_text(
-                f"⚙️ *НАСТРОЙКИ СТАВОК*\n\n"
-                f"Текущая базовая ставка: *{current_bet}* 💰\n"
-                f"Выберите новую базовую ставку:",
-                parse_mode='Markdown',
-                reply_markup=keyboard
-            )
+            # Изменяем базовую ставку
+
+            try:
+
+                new_bet = int(data.split("_")[1])
+
+                self.user_manager.set_default_bet(user_id, new_bet)
+
+                # Получаем обновленную клавиатуру
+
+                keyboard = self.get_settings_keyboard(user_id)
+
+                await query.edit_message_text(
+
+                    f"✅ Базовая ставка изменена на: *{new_bet}* 💰\n\n"
+
+                    "Теперь при нажатии '🎰 Крутить' будет использоваться эта ставка.",
+
+                    parse_mode='Markdown',
+
+                    reply_markup=keyboard
+
+                )
+
+                logging.info(f"User {user_id} changed bet to {new_bet}")
+
+            except (ValueError, IndexError) as e:
+
+                logging.error(f"Error parsing bet from {data}: {e}")
+
+                await query.edit_message_text("❌ Ошибка при изменении ставки!")
 
         elif data == "menu":
-            # Возвращаем в главное меню
-            welcome_text = """
-🎰 *ГЛАВНОЕ МЕНЮ* 🎰
 
-Выберите действие:
-"""
+            # Возвращаем в главное меню
+
+            welcome_text = "🎰 *ГЛАВНОЕ МЕНЮ* 🎰\n\nВыберите действие:"
+
+            try:
+
+                await query.edit_message_text(welcome_text, parse_mode='Markdown')
+
+            except:
+
+                # Если не удалось отредактировать, отправляем новое сообщение
+
+                await context.bot.send_message(
+
+                    chat_id=query.message.chat_id,
+
+                    text=welcome_text,
+
+                    parse_mode='Markdown'
+
+                )
+
             keyboard = self.get_main_keyboard()
-            await query.edit_message_text(welcome_text, parse_mode='Markdown')
+
             await context.bot.send_message(
+
                 chat_id=query.message.chat_id,
+
                 text="Используйте кнопки ниже для управления игрой:",
+
                 reply_markup=keyboard
+
             )
+
+        elif data == "current_bet":
+
+            # Просто показываем текущую ставку без изменений
+
+            current_bet = self.user_manager.get_default_bet(user_id)
+
+            await query.answer(f"Текущая ставка: {current_bet} 💰", show_alert=False)
+
+        # ВТОРОЕ - обрабатываем bet_
+        elif data.startswith("bet_"):
+            # Изменяем базовую ставку
+            try:
+                new_bet = int(data.split("_")[1])
+                self.user_manager.set_default_bet(user_id, new_bet)
+
+                # Получаем обновленную клавиатуру
+                keyboard = self.get_settings_keyboard(user_id)
+                await query.edit_message_text(
+                    f"✅ Базовая ставка изменена на: *{new_bet}* 💰\n\n"
+                    "Теперь при нажатии '🎰 Крутить' будет использоваться эта ставка.",
+                    parse_mode='Markdown',
+                    reply_markup=keyboard
+                )
+                logging.info(f"User {user_id} changed bet to {new_bet}")
+
+            except (ValueError, IndexError) as e:
+                logging.error(f"Error parsing bet from {data}: {e}")
+                await query.edit_message_text("❌ Ошибка при изменении ставки!")
+
+        elif data == "current_bet":
+            current_bet = self.user_manager.get_default_bet(user_id)
+            await query.answer(f"Текущая ставка: {current_bet} 💰", show_alert=False)
 
     async def process_spin_from_button(self, query, user_id: int, user_name: str, bet: int):
         """Обработка спина из кнопки"""
@@ -536,6 +641,7 @@ class SlotBot:
             # Обновление статистики
             self.user_manager.stats[user_id]['spins'] += 1
             self.user_manager.stats[user_id]['total_bet'] += bet
+            self.user_manager.set_jackpot(self.slot_machine.jackpot)
 
             # Сохраняем данные
             asyncio.create_task(self.user_manager._delayed_save())
@@ -603,7 +709,8 @@ class SlotBot:
         # Проверяем флуд-контроль
         if time_since_last_spin < self._min_spin_interval:
             wait_time = int(self._min_spin_interval - time_since_last_spin)
-            await update.message.reply_text(f"⏳ Слишком часто! Подождите {wait_time} секунд(-ы) перед следующим спином.")
+            await update.message.reply_text(
+                f"⏳ Слишком часто! Подождите {wait_time} секунд(-ы) перед следующим спином.")
             return
 
         if self._spin_locks[user_id].locked():
@@ -682,6 +789,7 @@ class SlotBot:
             # Обновление статистики
             self.user_manager.stats[user_id]['spins'] += 1
             self.user_manager.stats[user_id]['total_bet'] += bet
+            self.user_manager.set_jackpot(self.slot_machine.jackpot)
 
             # Сохраняем данные
             asyncio.create_task(self.user_manager._delayed_save())
@@ -793,12 +901,71 @@ class SlotBot:
 
         await update.message.reply_text(bonus_text, parse_mode='Markdown')
 
+    async def setbet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Установка базовой ставки"""
+        user_id = update.effective_user.id
+
+        # Добавляем проверку на тип context
+        if context is None or not hasattr(context, 'args'):
+            # Если context неверный, используем пустой args
+            context_args = []
+        else:
+            context_args = context.args
+
+        if not context.args:
+            current_bet = self.user_manager.get_default_bet(user_id)
+            await update.message.reply_text(
+                f"🎯 *ТЕКУЩАЯ БАЗОВАЯ СТАВКА:* {current_bet} 💰\n\n"
+                "⚙️ *ИСПОЛЬЗОВАНИЕ КОМАНДЫ:*\n"
+                "`/setbet <ставка>`\n\n"
+                "📋 *ДОСТУПНЫЕ СТАВКИ:*\n"
+                "1, 5, 10, 25, 50, 100, 500\n\n"
+                "💡 *ПРИМЕР:*\n"
+                "`/setbet 25` - установить ставку 25 кредитов",
+                parse_mode='Markdown'
+            )
+            return
+
+        try:
+            new_bet = int(context.args[0])
+
+            MIN_BET = 1
+            MAX_BET = 500
+
+            try:
+                bet_value = int(new_bet)
+                if not (MIN_BET <= bet_value <= MAX_BET):
+                    await update.message.reply_text(
+                        f"❌ Ставка должна быть от {MIN_BET} до {MAX_BET}"
+                    )
+                    return
+            except (ValueError, TypeError):
+                await update.message.reply_text("❌ Введите корректное число для ставки")
+                return
+
+            bet_value = int(new_bet)
+
+            # Устанавливаем новую ставку
+            self.user_manager.set_default_bet(user_id, new_bet)
+
+            await update.message.reply_text(
+                f"✅ *БАЗОВАЯ СТАВКА ИЗМЕНЕНА!*\n\n"
+                f"🎯 Новая ставка: *{new_bet}* 💰\n\n"
+                f"Теперь при использовании кнопки \"🎰 Крутить\" будет использоваться эта ставка.",
+                parse_mode='Markdown'
+            )
+
+            logging.info(f"User {user_id} changed bet to {new_bet}")
+
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат ставки! Используйте число.")
+
     async def add_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для добавления/списания баланса пользователю (только для администратора)"""
         user_id = update.effective_user.id
 
         # ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
-        ADMIN_IDS = [2120805605,913052916]  # Ваши ID
+        ADMIN_IDS = []  # Ваши ID
 
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Доступ запрещен!")
@@ -907,7 +1074,7 @@ class SlotBot:
         """Компактный список игроков (только ID, имя, прокруты)"""
         user_id = update.effective_user.id
 
-        ADMIN_IDS = [2120805605,913052916]  # Ваши Telegram ID
+        ADMIN_IDS = []  # Ваши Telegram ID
 
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Доступ запрещен!")
@@ -946,7 +1113,6 @@ class SlotBot:
             logging.error(f"Ошибка в list_users: {e}")
             await update.message.reply_text("❌ Произошла ошибка при получении списка пользователей!")
 
-
     async def leaderboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Создаем простую таблицу лидеров по балансу
         users_balances = [(uid, bal) for uid, bal in self.user_manager.balances.items()]
@@ -954,7 +1120,7 @@ class SlotBot:
 
         leaderboard_text = "🏆 *ТАБЛИЦА ЛИДЕРОВ*\n\n"
 
-        for i, (user_id, balance) in enumerate(users_balances[:10], 1):
+        for i, (user_id, balance) in enumerate(users_balances[:20], 1):
             leaderboard_text += f"{i}. 🎯 Игрок #{self.user_manager.user_names[user_id]}: {balance:,} 💰\n"
 
         leaderboard_text += f"\n🎯 Прогрессивный джекпот: {self.slot_machine.jackpot:,} 💰"
@@ -967,6 +1133,7 @@ class SlotBot:
 
     *🏠 ОСНОВНЫЕ КОМАНДЫ:*
     /spin [ставка] - 🎡 Запуск слотов (по умолчанию используется ваша базовая ставка)
+    /setbet <ставка> - 🎯 Изменение базовой ставки
     /balance - 💰 Показать баланс и статистику
     /bonus - 🎁 Получить ежедневный бонус (50-200 кредитов)
     /leaderboard - 🏆 Таблица лидеров по балансу
@@ -976,7 +1143,6 @@ class SlotBot:
     • «🎰 Крутить» - быстрый спин с базовой ставкой
     • «💰 Баланс» - посмотреть свой баланс
     • «🎁 Бонус» - получить ежедневный бонус
-    • «⚙️ Настройки» - изменить базовую ставку
     • «🏆 Лидеры» - таблица лидеров
     • «❓ Помощь» - эта справка
 
@@ -985,6 +1151,9 @@ class SlotBot:
     • Выигрышные комбинации от 3+ одинаковых символов подряд
     • Символ 💰 дает самый большой выигрыш и джекпот!
     • *Прогрессивный джекпот* растет с каждой игрой
+
+    *🎮 ДОСТУПНЫЕ СТАВКИ:*
+    1, 5, 10, 25, 50, 100 кредитов
 
     *💰 СИМВОЛЫ И ВЫПЛАТЫ (умножаются на вашу ставку):*
     🍒 3x=×2, 4x=×5, 5x=×10
@@ -1004,6 +1173,7 @@ class SlotBot:
     • *Статистика* - отслеживайте свою игровую активность
 
     *💡 СОВЕТЫ:*
+    • Используйте /setbet для удобной настройки ставок
     • Начните с небольших ставок для знакомства с игрой
     • Используйте /settings для удобной настройки ставок
     • Не забывайте забирать ежедневный бонус!
@@ -1019,7 +1189,7 @@ class SlotBot:
         user_id = update.effective_user.id
 
         # Список ID администраторов - должен совпадать с другими админ-функциями
-        ADMIN_IDS = [2120805605,913052916]  # Ваши Telegram ID
+        ADMIN_IDS = []  # Ваши Telegram ID
 
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Доступ запрещен!")
@@ -1038,10 +1208,10 @@ class SlotBot:
 
     *Использование /addbalance:*
     `/addbalance <user_id> <amount>`
-    
+
     *Рассылка сообщений:*
     `/broadcast - 📢 Отправка сообщения всем пользователям`
-    
+
     *Использование /broadcast:*
     `/broadcast <текст сообщения>`
 
@@ -1068,7 +1238,7 @@ class SlotBot:
         user_id = update.effective_user.id
 
         # Список ID администраторов - ЗАМЕНИТЕ на свои ID
-        ADMIN_IDS = [2120805605,913052916]  # Ваши Telegram ID
+        ADMIN_IDS = []  # Ваши Telegram ID
 
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Доступ запрещен!")
@@ -1129,13 +1299,12 @@ class SlotBot:
         """Отправка сообщения всем пользователям (только для администратора)"""
         user_id = update.effective_user.id
 
-        ADMIN_IDS = [2120805605]  # Ваши Telegram ID
+        ADMIN_IDS = []  # Добавьте второй ID
 
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Доступ запрещен!")
             return
 
-        # Проверяем аргументы команды
         if not context.args:
             await update.message.reply_text(
                 "ℹ️ Использование команды:\n"
@@ -1148,79 +1317,9 @@ class SlotBot:
 
         message_text = " ".join(context.args)
 
-        # Подтверждение перед рассылкой
-        confirm_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Да, отправить", callback_data=f"broadcast_confirm_{hash(message_text)}"),
-                InlineKeyboardButton("❌ Отмена", callback_data="broadcast_cancel")
-            ]
-        ])
-
-        await update.message.reply_text(
-            f"📢 *ПОДТВЕРЖДЕНИЕ РАССЫЛКИ*\n\n"
-            f"Сообщение:\n{message_text}\n\n"
-            f"Получателей: {len(self.user_manager.balances)} пользователей\n\n"
-            f"Вы уверены, что хотите отправить это сообщение всем пользователям?",
-            parse_mode='Markdown',
-            reply_markup=confirm_keyboard
-        )
-
-    async def broadcast_confirm_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик подтверждения рассылки"""
-        query = update.callback_query
-        await query.answer()
-
-        user_id = query.from_user.id
-        data = query.data
-
-        ADMIN_IDS = [2120805605]
-
-        if user_id not in ADMIN_IDS:
-            await query.edit_message_text("❌ Доступ запрещен!")
-            return
-
-        if data == "broadcast_cancel":
-            await query.edit_message_text("❌ Рассылка отменена.")
-            return
-
-        if data.startswith("broadcast_confirm_"):
-            # Извлекаем хэш сообщения из callback_data
-            message_hash = int(data.split("_")[2])
-
-            # Находим оригинальное сообщение в истории
-            original_text = query.message.text
-            message_lines = original_text.split('\n')
-            message_text = '\n'.join(message_lines[4:-3])  # Извлекаем текст сообщения
-
-            # Проверяем хэш для безопасности
-            if hash(message_text) != message_hash:
-                await query.edit_message_text("❌ Ошибка: сообщение не совпадает!")
-                return
-
-            await self.execute_broadcast(query, message_text, context)
-
-    async def broadcast_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отправка сообщения всем пользователям (только для администратора)"""
-        user_id = update.effective_user.id
-
-        ADMIN_IDS = [2120805605]  # Ваши Telegram ID
-
-        if user_id not in ADMIN_IDS:
-            await update.message.reply_text("❌ Доступ запрещен!")
-            return
-
-        # Проверяем аргументы команды
-        if not context.args:
-            await update.message.reply_text(
-                "ℹ️ Использование команды:\n"
-                "`/broadcast <сообщение>`\n\n"
-                "Пример:\n"
-                "`/broadcast Всем привет! Новое обновление бота!`\n\n"
-                "⚠️ Сообщение будет отправлено всем пользователям бота."
-            )
-            return
-
-        message_text = " ".join(context.args)
+        # Сохраняем сообщение в context.user_data
+        context.user_data['broadcast_message'] = message_text
+        context.user_data['broadcast_user_id'] = user_id
 
         # Подтверждение перед рассылкой
         confirm_keyboard = InlineKeyboardMarkup([
@@ -1230,9 +1329,6 @@ class SlotBot:
             ]
         ])
 
-        # Сохраняем текст сообщения в контексте для последующего использования
-        context.user_data['broadcast_message'] = message_text
-
         await update.message.reply_text(
             f"📢 *ПОДТВЕРЖДЕНИЕ РАССЫЛКИ*\n\n"
             f"Сообщение:\n{message_text}\n\n"
@@ -1250,7 +1346,7 @@ class SlotBot:
         user_id = query.from_user.id
         data = query.data
 
-        ADMIN_IDS = [2120805605]
+        ADMIN_IDS = []
 
         if user_id not in ADMIN_IDS:
             await query.edit_message_text("❌ Доступ запрещен!")
@@ -1258,10 +1354,17 @@ class SlotBot:
 
         if data == "broadcast_cancel":
             await query.edit_message_text("❌ Рассылка отменена.")
+            # Очищаем сохраненные данные
+            if 'broadcast_message' in context.user_data:
+                del context.user_data['broadcast_message']
             return
 
-        if data == "broadcast_confirm":
-            # Получаем сохраненное сообщение из контекста
+        elif data == "broadcast_confirm":
+            # Проверяем, что пользователь, подтверждающий рассылку, тот же, что и инициировавший
+            if context.user_data.get('broadcast_user_id') != user_id:
+                await query.edit_message_text("❌ Вы не инициировали эту рассылку!")
+                return
+
             message_text = context.user_data.get('broadcast_message', '')
 
             if not message_text:
@@ -1342,6 +1445,6 @@ class SlotBot:
 # Запуск бота
 
 if __name__ == "__main__":
-    TOKEN = "8018546111:AAGZ7nh7CcsrTlIAq7NJ_vEcmKlhFNzYBY4"  # Замените на ваш токен
+    TOKEN = "Token"  # Замените на ваш токен
     bot = SlotBot(TOKEN)
     bot.run()
